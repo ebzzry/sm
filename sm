@@ -1,0 +1,213 @@
+#!/usr/bin/env nix-shell
+#!nix-shell -i bash -p bash getopt coreutils mailsend
+
+set -eu
+set -o pipefail
+
+readonly DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly SELF="${BASH_SOURCE[0]}"
+readonly BASE_SELF=$(basename $SELF)
+readonly VERSION="0.0.1"
+readonly USER_CONFIG=$HOME/.smrc
+readonly SYSTEM_CONFIG=/etc/smrc
+readonly ALTERNATE_SYSTEM_CONFIG=/usr/local/etc/smrc
+
+error () { echo -e "\e[0;31m\e[1mError: \e[0;0m$@" >&2; exit 1; }
+warning () { echo -e "\e[0;33m\e[1mWarning: \e[0;0m$@" >&2; return 0; }
+
+if [[ -f $SYSTEM_CONFIG ]]; then
+    . $SYSTEM_CONFIG
+elif [[ -f $ALTERNATE_SYSTEM_CONFIG ]]; then
+    . $ALTERNATE_SYSTEM_CONFIG
+elif [[ -f $USER_CONFIG ]]; then
+    . $USER_CONFIG
+else
+  error "no config files exist."
+fi
+
+OPT_HELP=
+OPT_DEBUG=
+OPT_VERBOSE=
+
+OPT_SMTP_SERVER=${SERVER:-smtp.gmail.com}
+OPT_SMTP_PORT=${PORT:-587}
+OPT_SMTP_USERNAME=${USERNAME}
+OPT_SMTP_PASSWORD=${PASSWORD}
+
+OPT_FROM=${FROM}
+OPT_NAME=${NAME}
+
+OPT_TO=
+OPT_LIST=
+OPT_SUBJECT=
+OPT_MESSAGE=
+OPT_ATTACHMENT=
+OPT_CONFIG=
+
+mute () {
+  $@ > /dev/null 2>&1
+}
+
+display_usage () {
+  cat <<EOF
+Usage: $BASE_SELF [OPTIONS]
+
+Options:
+-h, --help               Display this help
+-f, --from ADDRESS       Specify the sender address
+-t, --to ADDRESSES       Specify the comma-separated list of recipients
+-l, --list FILE          Specify the file that contains the list of recipients
+-s, --subject SUBJECT    Specify the message subject
+-m, --message TEXT       Specify inlined message text
+-a, --attach FILE        Attach a file to the message
+-c, --config FILE        Specify an alternate configuration file
+EOF
+
+  exit 0
+}
+
+debug () {
+  if [[ -n "$OPT_DEBUG" ]]; then
+      echo '**'
+      echo \$@: $@
+      echo \$OPT_HELP: "$OPT_HELP"
+      echo \$OPT_VERBOSE: "$OPT_VERBOSE"
+      echo \$OPT_SMTP_SERVER: "$OPT_SMTP_SERVER"
+      echo \$OPT_SMTP_PORT: "$OPT_SMTP_PORT"
+      echo \$OPT_SMTP_USERNAME: "$OPT_SMTP_USERNAME"
+      echo \$OPT_SMTP_PASSWORD: "$OPT_SMTP_PASSWORD"
+      echo \$OPT_FROM: "$OPT_FROM"
+      echo \$OPT_NAME: "$OPT_NAME"
+      echo \$OPT_TO: "$OPT_TO"
+      echo \$OPT_LIST: "$OPT_LIST"
+      echo \$OPT_SUBJECT: "$OPT_SUBJECT"
+      echo \$OPT_MESSAGE: "$OPT_MESSAGE"
+      echo \$OPT_ATTACHMENT: "$OPT_ATTACHMENT"
+      echo \$OPT_CONFIG: "$OPT_CONFIG"
+  fi
+}
+
+check_configuration () {
+  debug check_configuration $@
+
+  if [[ -z "$OPT_SMTP_USERNAME" || -z "$OPT_SMTP_PASSWORD" ]]; then
+      error "please supply the login credentials"
+  fi
+}
+
+list_mime_types () {
+  debug list_mime_type $@
+
+  mailsend -show-mime-types | tr '\t' ','
+}
+
+get_mime_type () {
+  #debug list_mime_types $@
+
+  local file=$(basename $1)
+  local name=${file%.*}
+  local ext=${file##*.}
+
+  echo $(list_mime_types | grep ,$ext | awk -F , '{print $1}')
+}
+
+parse_arguments () {
+  debug parse_arguments $@
+
+  local opts=$(getopt -n "$SELF" --options hdvf:n:t:l:s:m:a:c: --longoptions help,debug,verbose,from:,name:,to:,list:,subject:,message:,attach:,config: -- "$@")
+
+  if [[ $? != 0 ]]; then error "failed to parse arguments."; fi
+
+  eval set -- "$opts"
+
+  while true; do
+    case "$1" in
+      (-h|--help) OPT_HELP=true; shift ;;
+      (-d|--debug) OPT_DEBUG=true; shift ;;
+      (-v|--verbose) OPT_VERBOSE=true; shift ;;
+      (-f|--from) OPT_FROM=$2; shift 2 ;;
+      (-n|--name) OPT_NAME=$2; shift 2 ;;
+      (-t|--to) OPT_TO=$2; shift 2 ;;
+      (-l|--list) OPT_LIST=$2; shift 2 ;;
+      (-s|--subject) OPT_SUBJECT=$2; shift 2 ;;
+      (-m|--message) OPT_MESSAGE=$2; shift 2 ;;
+      (-a|--attach) OPT_ATTACHMENT=$2; shift 2 ;;
+      (-c|--config) OPT_CONFIG=$2; shift 2 ;;
+      (--) shift; break ;;
+      (*) break ;;
+    esac
+  done
+}
+
+process_options () {
+  debug process_options $@
+
+  if [[ -n "$OPT_HELP" ]]; then
+      display_usage
+  elif [[ -n "$OPT_CONFIG" && -f "$OPT_CONFIG" ]]; then
+      . "$OPT_CONFIG"
+  else
+    return 0
+  fi
+}
+
+send_mail () {
+  debug send_mail $@
+
+  mailsend -auth -starttls -v -cs utf-8 \
+           -smtp "$OPT_SMTP_SERVER" -port "$OPT_SMTP_PORT" \
+           -user "$OPT_SMTP_USERNAME" -pass "$OPT_SMTP_PASSWORD" \
+           -from "$OPT_FROM" -name "$OPT_NAME" +cc +bcc \
+           -sub "$OPT_SUBJECT" "$@"
+}
+
+dispatch_message () {
+  debug dispatch_message $@
+
+  local extra_args=
+  local mime_type=
+
+  if [[ -n "$OPT_ATTACHMENT" ]]; then
+      mime_type=$(get_mime_type "$OPT_ATTACHMENT")
+      extra_args="-attach $OPT_ATTACHMENT,$mime_type,i"
+  fi
+
+  # Noto: Nun, -M kaj -n estas komune eksklusiva.
+  # Noto: Ĉu tiu iras fari la mesaĝo pli pura?
+  if [[ -n "$OPT_MESSAGE" ]]; then
+      echo dispatch_message/then
+      send_mail -M "$OPT_MESSAGE" $extra_args "$@"
+  elif [[ -n "$OPT_ATTACHMENT" ]]; then
+      echo dispatch_message/then2
+      send_mail $extra_args "$@"
+  else
+    echo dispatch_message/else
+    error "please specify the message source"
+  fi
+}
+
+dispatch_destination () {
+  debug dispatch_destination $@
+
+  # -t havas antaŭeco sur -list_address
+  if [[ -n "$OPT_FROM" && -n "$OPT_NAME" ]]; then
+      if [[ -n "$OPT_TO" ]]; then
+          dispatch_message -t "$OPT_TO"
+      elif [[ -n "$OPT_LIST" ]]; then
+          dispatch_message -list_address "$OPT_LIST"
+      fi
+  else
+    error "please specify the FROM address"
+  fi
+}
+
+main () {
+  debug main $@
+
+  check_configuration
+  parse_arguments "$@"
+  process_options "$@"
+  dispatch_destination "$@"
+}
+
+main "$@"
