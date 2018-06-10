@@ -19,10 +19,10 @@ if [[ -f $SYSTEM_CONFIG ]]; then
     . $SYSTEM_CONFIG
 elif [[ -f $ALTERNATE_SYSTEM_CONFIG ]]; then
     . $ALTERNATE_SYSTEM_CONFIG
-elif [[ -f $USER_CONFIG ]]; then
+elif [ -f $USER_CONFIG ]; then
     . $USER_CONFIG
 else
-  error "no config files exist."
+  error no config files exist.
 fi
 
 OPT_HELP=
